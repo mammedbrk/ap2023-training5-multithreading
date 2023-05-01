@@ -9,6 +9,7 @@ public class MultiThreadCopier {
     private final String dest;
     private final int workerCount;
     private final long size;
+    private final DownloadThread[] threads;
 
     public MultiThreadCopier(SourceProvider sourceProvider, String dest, int workerCount) {
         this.sourceProvider = sourceProvider;
@@ -16,56 +17,37 @@ public class MultiThreadCopier {
         this.workerCount = workerCount;
 
         this.size = sourceProvider.size();
+        threads = new DownloadThread[workerCount];
     }
 
     public void start() {
         try {
-            RandomAccessFile randomAccessFile = new RandomAccessFile(dest, "rw");
-            randomAccessFile.write(new byte[(int) size]);
-            randomAccessFile.close();
+            initFile();
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
 
+        Lock lock = new Lock();
+
         for (int i = 0; i < workerCount; i++) {
-            int finalI = i;
-            new Thread(new Runnable() {
-                @Override
-                public void run() {
-                    long length = size / workerCount;
-                    long offset = finalI * length;
+            long offset, remaining;
+            offset = i * (size / workerCount);
+            if (i < workerCount - 1) remaining = size / workerCount;
+            else remaining = size - offset;
+            DownloadThread thread = new DownloadThread(i, dest, lock, offset, remaining, sourceProvider.connect(offset));
 
-                    if (finalI == workerCount - 1) {
-                        length = size - offset;
-                    }
-                    long end = offset + length;
-
-                    RandomAccessFile randomAccessFile;
-                    try {
-                        randomAccessFile = new RandomAccessFile(dest, "rw");
-                        randomAccessFile.seek(offset);
-                    } catch (IOException e) {
-                        throw new RuntimeException(e);
-                    }
-
-                    SourceReader sourceReader = sourceProvider.connect(offset);
-
-                    while (offset < end) {
-                        try {
-                            randomAccessFile.writeByte(sourceReader.read());
-                        } catch (IOException e) {
-                            throw new RuntimeException(e);
-                        }
-                        offset++;
-                    }
-
-                    try {
-                        randomAccessFile.close();
-                    } catch (IOException e) {
-                        throw new RuntimeException(e);
-                    }
-                }
-            }).start();
+            thread.start();
+            threads[i] = thread;
         }
+
+        DownloadThreadManager manager = new DownloadThreadManager(SAFE_MARGIN, workerCount, threads, sourceProvider, lock);
+        manager.start();
+    }
+
+    private void initFile() throws IOException {
+        RandomAccessFile randomAccessFile = new RandomAccessFile(dest, "rw");
+        randomAccessFile.write(new byte[(int) size]);
+        randomAccessFile.close();
     }
 }
+
